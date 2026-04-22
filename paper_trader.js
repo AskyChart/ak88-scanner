@@ -29,7 +29,46 @@ const CONFIG = {
   TICK_INTERVAL_MS: 5 * 60 * 1000,     // проверка SL/TP открытых позиций: 5 мин
   STATE_FILE: path.join(__dirname, 'paper_state.json'),
   BINANCE: 'https://fapi.binance.com',
+  // Telegram notifications
+  TELEGRAM_TOKEN: '8629365441:AAEdKh0b_n57t0x_Gqv32n1VMvIH8WbLBkQ',
+  TELEGRAM_CHAT_ID: '481990619',
+  TELEGRAM_ENABLED: true,
 };
+
+// ============================================================
+// TELEGRAM
+// ============================================================
+async function sendTelegram(html) {
+  if (!CONFIG.TELEGRAM_ENABLED) return;
+  try {
+    const url = `https://api.telegram.org/bot${CONFIG.TELEGRAM_TOKEN}/sendMessage`;
+    const body = {
+      chat_id: CONFIG.TELEGRAM_CHAT_ID,
+      text: html,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    };
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('[paper][tg] send failed:', r.status, errText);
+    }
+  } catch (e) {
+    console.error('[paper][tg] error:', e.message);
+  }
+}
+
+function fmtPriceTg(p) {
+  if (!p) return '-';
+  if (p >= 1000) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(4);
+  if (p >= 0.01) return p.toFixed(5);
+  return p.toFixed(7);
+}
 
 // ============================================================
 // STATE
@@ -148,6 +187,25 @@ function openPosition(setup) {
 
   state.positions.push(pos);
   console.log(`[paper] OPENED ${pos.direction} ${pos.symbol} @ ${entry.toFixed(6)} | SL=${sl.toFixed(6)} | risk=$${riskUsd.toFixed(2)} | score=${pos.score}`);
+
+  // Telegram notification
+  const dirEmoji = pos.direction === 'BUY' ? '🟢' : '🔴';
+  const tvUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${pos.symbol}.P&interval=240`;
+  const rr2 = Math.abs(pos.tp2 - pos.entry) / Math.abs(pos.originalSL - pos.entry);
+  const msg =
+    `${dirEmoji} <b>ОТКРЫТА ${pos.direction}</b>\n\n` +
+    `<b>${pos.symbol}</b> · Score ${pos.score} (${pos.verdict})\n` +
+    `<a href="${tvUrl}">📈 Открыть график</a>\n\n` +
+    `Entry: <code>${fmtPriceTg(pos.entry)}</code>\n` +
+    `SL: <code>${fmtPriceTg(pos.originalSL)}</code>\n` +
+    `TP1: <code>${fmtPriceTg(pos.tp1)}</code>\n` +
+    `TP2: <code>${fmtPriceTg(pos.tp2)}</code> (R:R ${rr2.toFixed(2)})\n` +
+    `TP3: <code>${fmtPriceTg(pos.tp3)}</code>\n\n` +
+    `💵 Размер: $${pos.positionValueUsd.toFixed(2)}\n` +
+    `⚠️ Риск: $${pos.riskUsd.toFixed(2)} (1R)\n` +
+    `💰 Баланс: $${state.balance.toFixed(2)}`;
+  sendTelegram(msg);
+
   return pos;
 }
 
@@ -187,6 +245,19 @@ function partialClose(pos, fraction, price, reason) {
   });
 
   console.log(`[paper] ${reason} ${pos.symbol} @ ${price.toFixed(6)} | pnl=$${pnlUsd.toFixed(2)} (${pnlR.toFixed(2)}R) | balance=$${state.balance.toFixed(2)}`);
+
+  // Telegram
+  const tpEmoji = reason === 'tp1' ? '🎯' : '💰';
+  const tpName = reason.toUpperCase();
+  const beNote = (reason === 'tp1' && CONFIG.MOVE_TO_BE_AFTER_TP1) ? '\n🛡 SL перенесён в безубыток' : '';
+  const tgMsg =
+    `${tpEmoji} <b>${tpName} достигнут: ${pos.symbol}</b>\n\n` +
+    `Цена: <code>${fmtPriceTg(price)}</code>\n` +
+    `Закрыто: ${Math.round(fraction * 100)}% позиции\n` +
+    `P&L: <b>${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}</b> (${pnlR >= 0 ? '+' : ''}${pnlR.toFixed(2)}R)${beNote}\n\n` +
+    `Всего по сделке: ${pos.pnlRealized >= 0 ? '+' : ''}$${pos.pnlRealized.toFixed(2)} (${pos.pnlR >= 0 ? '+' : ''}${pos.pnlR.toFixed(2)}R)\n` +
+    `💰 Баланс: $${state.balance.toFixed(2)}`;
+  sendTelegram(tgMsg);
 
   // После TP1 — перенос SL в безубыток
   if (reason === 'tp1' && CONFIG.MOVE_TO_BE_AFTER_TP1) {
@@ -233,6 +304,24 @@ function closePosition(pos, price, reason) {
   }
 
   console.log(`[paper] CLOSED ${pos.symbol} reason=${reason} total_pnl=$${pos.pnlRealized.toFixed(2)} (${pos.pnlR.toFixed(2)}R)`);
+
+  // Telegram
+  let closeEmoji, closeTitle;
+  if (reason === 'stop') { closeEmoji = '🛑'; closeTitle = 'СТОП ЗАКРЫТ'; }
+  else if (reason === 'be') { closeEmoji = '🛡'; closeTitle = 'Закрыто в безубыток'; }
+  else if (reason === 'tp3') { closeEmoji = '🏆'; closeTitle = 'TP3 — полное закрытие'; }
+  else { closeEmoji = '📉'; closeTitle = 'Закрыто'; }
+
+  const tvUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${pos.symbol}.P&interval=240`;
+  const pnlSign = pos.pnlRealized >= 0 ? '+' : '';
+  const closeTgMsg =
+    `${closeEmoji} <b>${closeTitle}: ${pos.symbol}</b>\n\n` +
+    `<a href="${tvUrl}">📈 График</a>\n\n` +
+    `Close: <code>${fmtPriceTg(price)}</code>\n` +
+    `Итог: <b>${pnlSign}$${pos.pnlRealized.toFixed(2)}</b> (${pnlSign}${pos.pnlR.toFixed(2)}R)\n\n` +
+    `💰 Баланс: <b>$${state.balance.toFixed(2)}</b>\n` +
+    `📊 Total P&L: ${(state.balance - state.startBalance) >= 0 ? '+' : ''}$${(state.balance - state.startBalance).toFixed(2)}`;
+  sendTelegram(closeTgMsg);
 }
 
 async function updateOpenPosition(pos) {
@@ -551,6 +640,18 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`[paper] AK88 Paper Trader listening on port ${PORT}`);
   });
+
+  // Стартовое сообщение в Telegram
+  const startMsg =
+    `🚀 <b>AK88 Paper Trader запущен</b>\n\n` +
+    `💰 Баланс: $${state.balance.toFixed(2)}\n` +
+    `📊 Открытых: ${state.positions.filter(p => p.status === 'open').length}\n` +
+    `📈 Всего сделок: ${state.positions.length}\n\n` +
+    `⚙️ Риск: ${CONFIG.RISK_PER_TRADE_PCT}% на позицию\n` +
+    `🎯 Max concurrent: ${CONFIG.MAX_CONCURRENT_POSITIONS}\n` +
+    `📉 Min Score: ${CONFIG.MIN_SCORE}\n\n` +
+    `Следу за сканером каждые ${CONFIG.CHECK_INTERVAL_MS/60000} мин`;
+  sendTelegram(startMsg);
 
   // Первый тик через 30 сек после старта
   setTimeout(async () => {
