@@ -1,0 +1,173 @@
+//@version=6
+indicator("AK88 Donchian Turtle", shorttitle="AK88 DCH", overlay=true, max_boxes_count=20, max_lines_count=50, max_labels_count=30)
+
+// ============================================================
+// INPUTS
+// ============================================================
+grpD = "=== Donchian ==="
+entryPeriod = input.int(20, "Entry period (пробой)", minval=5, group=grpD)
+exitPeriod  = input.int(10, "Exit period (trailing)", minval=3, group=grpD)
+
+grpR = "=== Risk ==="
+atrLen      = input.int(14, "ATR length", group=grpR)
+stopAtrMult = input.float(2.0, "Stop x ATR", step=0.5, group=grpR)
+
+grpT = "=== Trend filter ==="
+useTrendFilter = input.bool(true, "EMA trend filter", group=grpT)
+trendEmaLen    = input.int(200, "EMA length", group=grpT)
+
+grpDisp = "=== Display ==="
+showDonchian = input.bool(true, "Donchian каналы", group=grpDisp)
+showStops    = input.bool(true, "Текущий стоп (если позиция)", group=grpDisp)
+showLabels   = input.bool(true, "Подписи входов/выходов", group=grpDisp)
+showTable    = input.bool(true, "Таблица", group=grpDisp)
+
+// ============================================================
+// CALCULATIONS
+// ============================================================
+// Donchian: high/low over last N bars (excluding current to avoid self-breakout)
+entryUpper = ta.highest(high[1], entryPeriod)
+entryLower = ta.lowest(low[1],  entryPeriod)
+exitUpper  = ta.highest(high[1], exitPeriod)
+exitLower  = ta.lowest(low[1],  exitPeriod)
+
+atrVal = ta.atr(atrLen)
+emaTrend = ta.ema(close, trendEmaLen)
+
+// ============================================================
+// STATE MACHINE
+// ============================================================
+// Track current position state
+var string posType = "none"  // "long", "short", "none"
+var float  entryPrice = na
+var float  stopPrice  = na
+var int    entryBar   = na
+
+// Signals
+longBreakout  = high > entryUpper
+shortBreakout = low  < entryLower
+
+canLong  = useTrendFilter ? close > emaTrend : true
+canShort = useTrendFilter ? close < emaTrend : true
+
+longEntry  = posType == "none" and longBreakout  and canLong
+shortEntry = posType == "none" and shortBreakout and canShort
+
+// Exit conditions
+longStopHit  = posType == "long"  and low <= stopPrice
+shortStopHit = posType == "short" and high >= stopPrice
+longDonchianExit  = posType == "long"  and low  <= exitLower
+shortDonchianExit = posType == "short" and high >= exitUpper
+
+// Entry action
+if longEntry
+    posType := "long"
+    entryPrice := entryUpper  // consider entering at break level
+    stopPrice := entryPrice - atrVal * stopAtrMult
+    entryBar := bar_index
+
+if shortEntry
+    posType := "short"
+    entryPrice := entryLower
+    stopPrice := entryPrice + atrVal * stopAtrMult
+    entryBar := bar_index
+
+// Exit action
+longExitReason  = longStopHit ? "STOP" : longDonchianExit ? "DON-EXIT" : ""
+shortExitReason = shortStopHit ? "STOP" : shortDonchianExit ? "DON-EXIT" : ""
+
+if posType == "long" and (longStopHit or longDonchianExit)
+    posType := "none"
+    entryPrice := na
+    stopPrice := na
+    entryBar := na
+
+if posType == "short" and (shortStopHit or shortDonchianExit)
+    posType := "none"
+    entryPrice := na
+    stopPrice := na
+    entryBar := na
+
+// ============================================================
+// VISUAL
+// ============================================================
+// Donchian channels
+pUpper = plot(showDonchian ? entryUpper : na, color=color.new(color.green, 40), linewidth=1, title="Entry Upper (20)")
+pLower = plot(showDonchian ? entryLower : na, color=color.new(color.red, 40),   linewidth=1, title="Entry Lower (20)")
+pExitU = plot(showDonchian ? exitUpper  : na, color=color.new(color.orange, 60), linewidth=1, style=plot.style_linebr, title="Exit Upper (10)")
+pExitL = plot(showDonchian ? exitLower  : na, color=color.new(color.orange, 60), linewidth=1, style=plot.style_linebr, title="Exit Lower (10)")
+fill(pUpper, pLower, color=showDonchian ? color.new(color.gray, 95) : na)
+
+// EMA trend filter line
+plot(useTrendFilter ? emaTrend : na, color=color.new(color.blue, 30), linewidth=2, title="EMA Trend")
+
+// Current stop line (only if position)
+plot(showStops and posType != "none" ? stopPrice : na, color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr, title="Active Stop")
+
+// Entry/exit labels
+if showLabels and longEntry
+    label.new(bar_index, low - atrVal, "LONG\n" + str.tostring(entryUpper, "#.####"), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.small)
+
+if showLabels and shortEntry
+    label.new(bar_index, high + atrVal, "SHORT\n" + str.tostring(entryLower, "#.####"), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+if showLabels and posType[1] == "long" and (longStopHit or longDonchianExit)
+    label.new(bar_index, high + atrVal, longExitReason, style=label.style_label_down, color=color.new(color.gray, 20), textcolor=color.white, size=size.tiny)
+
+if showLabels and posType[1] == "short" and (shortStopHit or shortDonchianExit)
+    label.new(bar_index, low - atrVal, shortExitReason, style=label.style_label_up, color=color.new(color.gray, 20), textcolor=color.white, size=size.tiny)
+
+// ============================================================
+// ALERTS
+// ============================================================
+alertcondition(longEntry,  title="Donchian LONG entry",  message="Donchian LONG: {{ticker}} пробой верхнего канала")
+alertcondition(shortEntry, title="Donchian SHORT entry", message="Donchian SHORT: {{ticker}} пробой нижнего канала")
+
+// ============================================================
+// INFO TABLE
+// ============================================================
+var table tbl = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 20), border_width=1)
+
+if barstate.islast and showTable
+    // Direction bias by trend filter
+    trendBias = useTrendFilter ? (close > emaTrend ? "BULL" : "BEAR") : "neutral"
+    biasColor = trendBias == "BULL" ? color.new(color.green, 0) : trendBias == "BEAR" ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+    posColor = posType == "long" ? color.new(color.green, 0) : posType == "short" ? color.new(color.red, 0) : color.new(color.gray, 40)
+    posText = posType == "long" ? "LONG" : posType == "short" ? "SHORT" : "NONE"
+
+    // Risk per R
+    rDist = posType != "none" ? math.abs(close - stopPrice) / close * 100 : na
+    rText = not na(rDist) ? str.tostring(rDist, "#.##") + "%" : "-"
+
+    // Distance to breakouts (informational)
+    distToUpper = (entryUpper - close) / close * 100
+    distToLower = (close - entryLower) / close * 100
+
+    table.cell(tbl, 0, 0, "AK88 Donchian", bgcolor=color.new(color.navy, 0), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, posText, bgcolor=posColor, text_color=color.white, text_size=size.small)
+
+    table.cell(tbl, 0, 1, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(tbl, 1, 1, trendBias, bgcolor=biasColor, text_color=color.white, text_size=size.tiny)
+
+    table.cell(tbl, 0, 2, "Entry Upper", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 2, str.tostring(entryUpper, "#.####") + "  (+" + str.tostring(distToUpper, "#.#") + "%)", text_color=color.new(color.green, 0), text_size=size.tiny)
+
+    table.cell(tbl, 0, 3, "Entry Lower", text_color=color.white, text_size=size.tiny)
+    table.cell(tbl, 1, 3, str.tostring(entryLower, "#.####") + "  (-" + str.tostring(distToLower, "#.#") + "%)", text_color=color.new(color.red, 0), text_size=size.tiny)
+
+    if posType != "none"
+        table.cell(tbl, 0, 4, "Entry", text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 4, str.tostring(entryPrice, "#.####"), text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 0, 5, "Stop", text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 5, str.tostring(stopPrice, "#.####"), text_color=color.new(color.red, 0), text_size=size.tiny)
+        table.cell(tbl, 0, 6, "Risk %", text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 6, rText, text_color=color.yellow, text_size=size.tiny)
+        trailText = posType == "long" ? str.tostring(exitLower, "#.####") : str.tostring(exitUpper, "#.####")
+        table.cell(tbl, 0, 7, "Trail exit", text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 7, trailText, text_color=color.orange, text_size=size.tiny)
+    else
+        table.cell(tbl, 0, 4, "ATR", text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 4, str.tostring(atrVal, "#.####"), text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 0, 5, "EMA" + str.tostring(trendEmaLen), text_color=color.white, text_size=size.tiny)
+        table.cell(tbl, 1, 5, str.tostring(emaTrend, "#.####"), text_color=color.blue, text_size=size.tiny)
